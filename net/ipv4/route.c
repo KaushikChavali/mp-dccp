@@ -1738,10 +1738,20 @@ static int __mkroute_input(struct sk_buff *skb,
 
 	fnhe = find_exception(&FIB_RES_NH(*res), daddr);
 	if (do_cache) {
-		if (fnhe)
+		if (fnhe) {
 			rth = rcu_dereference(fnhe->fnhe_rth_input);
-		else
-			rth = rcu_dereference(FIB_RES_NH(*res).nh_rth_input);
+			if (rth && rth->dst.expires &&
+			    time_after(jiffies, rth->dst.expires)) {
+				ip_del_fnhe(&FIB_RES_NH(*res), daddr);
+				fnhe = NULL;
+			} else {
+				goto rt_cache;
+			}
+		}
+		
+		rth = rcu_dereference(FIB_RES_NH(*res).nh_rth_input);
+		
+rt_cache:
 		if (rt_cache_valid(rth)) {
 			skb_dst_set_noref(skb, &rth->dst);
 			goto out;
@@ -2233,17 +2243,27 @@ static struct rtable *__mkroute_output(const struct fib_result *res,
 			goto add;
 		if (fnhe) {
 			prth = &fnhe->fnhe_rth_output;
-		} else {
-			if (unlikely(fl4->flowi4_flags &
-				     FLOWI_FLAG_KNOWN_NH &&
-				     !(nh->nh_gw &&
-				       nh->nh_scope == RT_SCOPE_LINK))) {
-				do_cache = false;
-				goto add;
+			rth = rcu_dereference(*prth);
+			if (rth && rth->dst.expires &&
+			    time_after(jiffies, rth->dst.expires)) {
+				ip_del_fnhe(nh, fl4->daddr);
+				fnhe = NULL;
+			} else {
+				goto rt_cache;
 			}
-			prth = raw_cpu_ptr(nh->nh_pcpu_rth_output);
 		}
+
+        if (unlikely(fl4->flowi4_flags &
+			     FLOWI_FLAG_KNOWN_NH &&
+			     !(nh->nh_gw &&
+			       nh->nh_scope == RT_SCOPE_LINK))) {
+			do_cache = false;
+			goto add;
+		}
+		prth = raw_cpu_ptr(nh->nh_pcpu_rth_output);
 		rth = rcu_dereference(*prth);
+
+rt_cache:
 		if (rt_cache_valid(rth) && dst_hold_safe(&rth->dst))
 			return rth;
 	}
